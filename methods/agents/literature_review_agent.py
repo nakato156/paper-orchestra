@@ -27,7 +27,11 @@ from methods.prompts.literature_review_agent import (
 )
 from utils.gemini_utils import call_gemini_with_contents, parse_gemini_latex_results
 from utils.llm_backend_utils import call_llm_with_text_prompt
-from utils.scholar_utils import s2_title_search
+from utils.scholar_utils import s2_relevance_search, s2_title_search
+
+# "s2" works with any provider. "gemini" is the original Google Search grounded
+# discovery, which needs Gemini credentials whatever LLM_PROVIDER says.
+SEARCH_BACKENDS = ("s2", "gemini")
 
 
 class CandidatePaper(BaseModel):
@@ -85,7 +89,15 @@ class HybridLiteratureAgent:
             "conference_guidelines.md": conference_guidelines_path,
         }
         self.context_files = self._load_context_files()
-        self.google_search_tool = types.Tool(google_search=types.GoogleSearch())
+
+        self.search_backend = os.environ.get(
+            "LITERATURE_SEARCH_BACKEND", "s2"
+        ).strip().lower()
+        if self.search_backend not in SEARCH_BACKENDS:
+            raise ValueError(
+                f"LITERATURE_SEARCH_BACKEND must be one of {SEARCH_BACKENDS}, "
+                f"got '{self.search_backend}'."
+            )
 
         self.registry_lock = threading.Lock()
         self.print_lock = threading.Lock()
@@ -173,13 +185,15 @@ class HybridLiteratureAgent:
         if not active_tasks:
             return
 
-        self._safe_print(f"   🔎 Phase 1a: Google Candidates Discovery (MaxPool=10)...")
+        self._safe_print(
+            f"   🔎 Phase 1a: Candidate Discovery via '{self.search_backend}' (MaxPool=10)..."
+        )
         all_candidates_with_tasks = []
 
         with ThreadPoolExecutor(max_workers=10) as executor:  # Fast for Google Search!
             future_to_task = {
                 executor.submit(
-                    self._process_search_task_google, task, outline, cutoff_date
+                    self._process_search_task, task, outline, cutoff_date
                 ): task
                 for task in active_tasks
             }
@@ -194,17 +208,14 @@ class HybridLiteratureAgent:
                             )
                 except Exception as exc:
                     self._safe_print(
-                        f"      ❌ Google Search failed for '{task['focus'][:20]}...': {exc}"
+                        f"      ❌ Discovery failed for '{task['focus'][:20]}...': {exc}"
                     )
 
-        self._safe_print(
-            f"   📊 Phase 1b: Semantic Scholar Enrichment (Rate-limited, sequential)..."
-        )
-        import time
+        self._safe_print(f"   📊 Phase 1b: Semantic Scholar Enrichment...")
 
+        # No sleep here any more: scholar_utils throttles every S2 request process-wide,
+        # and candidates discovered through S2 arrive already enriched.
         for item in all_candidates_with_tasks:
-            # wait 1s per query to avoid SS rate limits!
-            time.sleep(1.0)
             self._enrich_and_register_paper(
                 item["cand"], item["task"], registry, cutoff_date
             )
@@ -303,7 +314,7 @@ class HybridLiteratureAgent:
 
         return outline
 
-    def _process_search_task_google(self, task, outline, cutoff_date) -> list:
+    def _process_search_task(self, task, outline, cutoff_date) -> list:
         if task.get("search_type") == "targeted":
             self._safe_print(
                 f"   🎯 Targeted Search [{task['section']}]: '{task['focus']}'"
@@ -336,7 +347,11 @@ class HybridLiteratureAgent:
                 return
 
         try:
-            s2_data = s2_title_search(cand_title, cand_year, cutoff_date)
+            # S2 discovery already hands us the record; only the Gemini path, which
+            # returns bare titles, still needs the lookup.
+            s2_data = cand.get("s2_record") if isinstance(cand, dict) else None
+            if s2_data is None:
+                s2_data = s2_title_search(cand_title, cand_year, cutoff_date)
 
             if s2_data:
                 if not self._is_paper_allowed(s2_data, cutoff_date):
@@ -425,6 +440,168 @@ class HybridLiteratureAgent:
         return True
 
     def _discover_candidates(self, task, outline, cutoff_date) -> List[CandidatePaper]:
+        if self.search_backend == "gemini":
+            return self._discover_candidates_gemini(task, outline, cutoff_date)
+        return self._discover_candidates_s2(task, cutoff_date)
+
+    # --- S2 DISCOVERY (provider agnostic) ---
+
+    @staticmethod
+    def _candidate_from_s2(record: Dict, reason: str) -> Dict:
+        """Shapes an S2 record like a discovery candidate, carrying the record along.
+
+        Keeping the record spares _enrich_and_register_paper a second lookup for a
+        paper S2 just handed us.
+        """
+        return {
+            "title": record.get("title"),
+            "year": record.get("year"),
+            "reason": reason,
+            "s2_record": record,
+        }
+
+    def _ask_model_for_json(self, prompt: str, temperature: float) -> Dict:
+        """One short, provider-agnostic call. Returns {} rather than raising."""
+        try:
+            response_dict = call_llm_with_text_prompt(
+                prompt=prompt,
+                model_name=self.model_name,
+                generation_configs={"temperature": temperature},
+                check_parsed_response_not_none=False,
+            )
+            parsed = response_dict.get("parsed_response")
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as e:
+            self._safe_print(f"      ⚠️ Query planning call failed: {e}")
+            return {}
+
+    def _plan_search_queries(self, task, cutoff_date) -> List[str]:
+        """Turns a search focus into a few Semantic Scholar queries."""
+        prompt = f"""
+        You are planning a Semantic Scholar literature search.
+
+        SEARCH TASK: {task['focus']}
+        CONTEXT FOR TASK: {task['context']}
+        CUTOFF DATE: Papers published BEFORE {cutoff_date}
+
+        Write 3 short keyword queries that would surface the most relevant and
+        influential papers for this task. Use the terminology the literature itself
+        uses. Each query should be 3-8 words, no boolean operators, no quotes, no
+        year filters. Make them complementary rather than rephrasings of each other.
+
+        Return JSON only:
+        {{"queries": ["...", "...", "..."]}}
+        """
+        parsed = self._ask_model_for_json(prompt, temperature=0.3)
+        queries = [
+            q.strip()
+            for q in parsed.get("queries", [])
+            if isinstance(q, str) and q.strip()
+        ]
+        # The focus is already a search string written by the outline agent, so it is
+        # a safe fallback when the model gives us nothing usable.
+        return queries[:3] or [task["focus"]]
+
+    def _resolve_targeted_title(self, task, cutoff_date) -> str:
+        """Turns a citation hint ('the paper that introduced X') into a likely title."""
+        prompt = f"""
+        A paper is described below. Give the exact title of the primary paper that
+        introduced it. If the hint names a dataset, model or baseline, give the
+        original paper that introduced it, not a later paper that uses it.
+
+        HINT: {task['focus']}
+        CONTEXT: {task['context']}
+        CUTOFF DATE: Published BEFORE {cutoff_date}
+
+        Return JSON only, with the title alone and no authors or venue:
+        {{"title": "..."}}
+        """
+        parsed = self._ask_model_for_json(prompt, temperature=0.0)
+        title = parsed.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+        return task["focus"]
+
+    def _filter_relevant(self, task, records: List[Dict]) -> List[Dict]:
+        """Drops results that match the keywords but not the subject.
+
+        Semantic Scholar ranks by keyword relevance, so a broad query like "efficient
+        neural network architectures" happily returns medical imaging and 5G papers.
+        Citation count cannot separate those out -- they are genuinely well cited -- so
+        the model is asked to judge each result against the actual search task.
+        """
+        if not records:
+            return []
+
+        listing = "\n".join(
+            f"{i}. {r.get('title')} ({r.get('year')}). "
+            f"{(r.get('abstract') or '')[:200]}"
+            for i, r in enumerate(records)
+        )
+        prompt = f"""
+        A literature search returned the papers below. Decide which ones genuinely
+        belong in this section of the paper.
+
+        SEARCH TASK: {task['focus']}
+        SECTION CONTEXT: {task['context']}
+
+        PAPERS:
+        {listing}
+
+        Keep a paper only if it is about this subject, or if it is a method or baseline
+        this section would really cite. Reject papers that merely share vocabulary while
+        addressing a different application domain. Being highly cited is not a reason to
+        keep an off-topic paper.
+
+        Return JSON only, listing the numbers to keep:
+        {{"keep": [0, 3, 7]}}
+        """
+        parsed = self._ask_model_for_json(prompt, temperature=0.0)
+        keep = parsed.get("keep")
+        if not isinstance(keep, list):
+            # Fail open: a dropped filter should cost precision, not the whole task.
+            self._safe_print(
+                f"      ⚠️ Relevance filter unavailable for '{task['focus'][:40]}', keeping all"
+            )
+            return records
+
+        kept = [records[i] for i in keep if isinstance(i, int) and 0 <= i < len(records)]
+        self._safe_print(
+            f"      🧹 Relevance filter kept {len(kept)}/{len(records)} for '{task['focus'][:40]}'"
+        )
+        return kept
+
+    def _discover_candidates_s2(self, task, cutoff_date) -> List[Dict]:
+        if task.get("search_type") == "targeted":
+            title = self._resolve_targeted_title(task, cutoff_date)
+            record = s2_title_search(title, None, cutoff_date)
+            if not record:
+                self._safe_print(f"      ❌ S2 could not confirm '{title}'")
+                return []
+            return [
+                self._candidate_from_s2(
+                    record, f"Must-have citation for: {task['focus']}"
+                )
+            ]
+
+        merged: Dict[str, Dict] = {}
+        for query in self._plan_search_queries(task, cutoff_date):
+            for record in s2_relevance_search(query, limit=15, cutoff_date=cutoff_date):
+                merged.setdefault(self._normalize_title(record["title"]), record)
+
+        ranked = sorted(
+            merged.values(), key=lambda r: r.get("citationCount") or 0, reverse=True
+        )
+        # Filter before the cut, so an off-topic paper cannot occupy one of the slots.
+        relevant = self._filter_relevant(task, ranked[:30])
+        reason = f"Relevant to search task: {task['focus']}"
+        return [self._candidate_from_s2(record, reason) for record in relevant[:15]]
+
+    # --- GEMINI DISCOVERY (Google Search grounding, Gemini credentials required) ---
+
+    def _discover_candidates_gemini(
+        self, task, outline, cutoff_date
+    ) -> List[CandidatePaper]:
         intro_plan = outline.get("intro_related_work_plan", {}).get(
             "introduction_strategy", {}
         )
@@ -462,14 +639,14 @@ class HybridLiteratureAgent:
             {DiscoveryResult.model_json_schema()}
             """
 
-        # shortcut: paper discovery stays on Gemini because it needs Google Search grounding,
-        # so Gemini credentials are required even when LLM_PROVIDER=openai. Upgrade when the
-        # chosen provider exposes an equivalent web-search tool.
+        # Built here rather than in __init__ so the google.genai tool object is only
+        # constructed when this backend is actually selected.
+        google_search_tool = types.Tool(google_search=types.GoogleSearch())
         response_dict = call_gemini_with_contents(
             model_name="gemini-3-flash-preview",
             contents=[prompt],
             generation_configs={
-                "tools": [self.google_search_tool],
+                "tools": [google_search_tool],
                 "temperature": 0.1 if task.get("search_type") == "targeted" else 0.4,
             },
         )

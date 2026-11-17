@@ -83,16 +83,52 @@ See [Tests](#tests) for how to verify your setup.
 
 ### What still requires Gemini
 
-Two parts of the pipeline call Gemini directly regardless of the provider you choose, so
-they need `GEMINI_API_KEY` (or `VERTEX_AI_PROJECT`/`VERTEX_AI_LOCATION`) to be set:
+**Plotting and figure generation** (`--use_plotting`) calls Gemini directly whatever
+provider you select, because diagram rendering and the visual critic loop have no
+equivalent on the OpenAI side here. It needs `GEMINI_API_KEY` (or
+`VERTEX_AI_PROJECT`/`VERTEX_AI_LOCATION`).
 
-*   **Literature discovery**, which relies on Gemini's Google Search grounding, along with
-    the citation-title parsing helper it feeds.
-*   **Plotting and figure generation** (`--use_plotting`), because diagram rendering and the
-    visual critic loop have no equivalent on the OpenAI side here.
+Everything else — outline, literature review, section writing, content refinement and the
+autoraters — honours the selected provider.
 
-Outline generation, literature synthesis, section writing, content refinement and the
-autoraters all honour the selected provider.
+## Literature Search Backend
+
+Finding papers is separate from the provider that writes the prose, because it needs a
+source of real papers rather than a model's recollection of them.
+
+| `LITERATURE_SEARCH_BACKEND` | Behaviour |
+|---|---|
+| `s2` (default) | Semantic Scholar. Works with any provider, including local Ollama or vLLM. |
+| `gemini` | Gemini with Google Search grounding, the original behaviour. Needs Gemini credentials regardless of `LLM_PROVIDER`. |
+
+Both backends feed the same enrichment step: every candidate is confirmed against
+Semantic Scholar, and anything S2 cannot find, or that has no abstract, is dropped. The
+bibliographic data in the output always comes from S2, never from a model, so a
+hallucinated citation cannot reach the manuscript.
+
+The `s2` backend works in three steps per search task: the model turns the task into a
+few keyword queries, Semantic Scholar answers them, and the model then judges the results
+against the task before any are kept. That last step is not optional padding. S2 ranks by
+keyword relevance, so a broad query such as "efficient neural network architectures"
+returns well-cited medical-imaging and 5G papers that citation count cannot separate out.
+Measured on one review, filtering cut clearly off-topic results from 44% to 7% of the
+final bibliography, and made the run faster because fewer candidates needed enrichment.
+
+### Semantic Scholar is effectively mandatory
+
+`SEMANTIC_SCHOLAR_API_KEY` is listed as optional above, but in practice you want it.
+Anonymous callers share a single heavily throttled pool, and as of November 2026 that pool
+commonly returns `429` for **every** request, even one at a time several seconds apart.
+When that happens the literature review silently finds nothing, since an unconfirmed
+candidate is discarded. Request a free key at
+<https://www.semanticscholar.org/product/api>.
+
+Two knobs for tuning the client, both rarely needed with a key:
+
+*   `S2_MIN_REQUEST_INTERVAL` — seconds between requests, enforced process-wide across the
+    discovery thread pool. Default `1.0`.
+*   `S2_MAX_RETRIES` — attempts per request before giving up, with exponential backoff that
+    honours S2's `Retry-After`. Default `5`.
 
 ## Dataset
 
@@ -131,16 +167,22 @@ We provide an interactive Streamlit demo for the paper generation pipeline. For 
 
 ## Tests
 
-There is no test framework to install; both scripts run on plain Python.
+There is no test framework to install; every script runs on plain Python.
 
 ```bash
 python tests/test_provider_resolution.py   # offline, no API key, takes a second
+python tests/test_scholar_search.py        # network, no API key, no LLM
 python tests/test_pipeline_providers.py    # live, calls real APIs, a few cents
 ```
 
 *   `test_provider_resolution.py` checks the provider routing rules: prefixes, the
     `LLM_PROVIDER` variable, the legacy fallback, and that OpenRouter `:free` style
     suffixes are not mistaken for a provider prefix.
+*   `test_scholar_search.py` exercises the Semantic Scholar layer on its own: the cutoff
+    filter, most-cited-first ordering, that a non-existent title is rejected rather than
+    loosely matched, and that the throttle spaces requests out. If S2 is not answering it
+    **skips loudly** rather than passing, so a throttled empty result is never mistaken for
+    a genuine one.
 *   `test_pipeline_providers.py` runs the outline agent — the first pipeline step, whose
     output every later agent consumes — end to end against each provider you have
     credentials for, then asserts the outline carries the keys the downstream agents
