@@ -36,35 +36,20 @@ def rate_sxs_lit_review(
 
     while (not succeed) and cur_try < max_retries:
         try:
-            if "gemini" in model_name:
-                response_dict = call_llm_with_text_prompt(
-                    prompt=prompt,
-                    model_name=model_name,
-                    generation_configs={
-                        "system_instruction": sxs_lit_review_quality_system_prompt,
-                        "temperature": 0.0,
-                    },
-                )
-                succeed = True
-                return (
-                    response_dict.get("parsed_response", response_dict)
-                    if isinstance(response_dict, dict)
-                    else response_dict
-                )
-            elif "gpt" in model_name:
-                response_dict = call_llm_with_text_prompt(
-                    prompt=prompt,
-                    model_name=model_name,
-                    generation_configs={
-                        "system_instruction": sxs_lit_review_quality_system_prompt,
-                    },
-                )
-                succeed = True
-                return (
-                    response_dict.get("parsed_response", response_dict)
-                    if isinstance(response_dict, dict)
-                    else response_dict
-                )
+            response_dict = call_llm_with_text_prompt(
+                prompt=prompt,
+                model_name=model_name,
+                generation_configs={
+                    "system_instruction": sxs_lit_review_quality_system_prompt,
+                    "temperature": 0.0,
+                },
+            )
+            succeed = True
+            return (
+                response_dict.get("parsed_response", response_dict)
+                if isinstance(response_dict, dict)
+                else response_dict
+            )
 
         except Exception as e:
             print(

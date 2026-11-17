@@ -49,6 +49,12 @@ def get_openai_client() -> OpenAI:
     return _openai_client
 
 
+def is_o_series_model(model_name: str) -> bool:
+    """True for o1/o3/o4 reasoning models, which take a 'developer' role and reject temperature."""
+    # OpenRouter-style ids carry a vendor prefix, e.g. "openai/o3-mini".
+    return model_name.rsplit("/", 1)[-1].startswith(("o1", "o3", "o4"))
+
+
 def parse_openai_json_results(response: str):
     if not response or not isinstance(response, str):
         return None
@@ -123,11 +129,19 @@ def call_openai_models_with_content(
     parsed_response = None
     openai_client = get_openai_client()
 
+    is_o_series = is_o_series_model(model_name)
+    if is_o_series:
+        generation_configs = {
+            key: value
+            for key, value in generation_configs.items()
+            if key != "temperature"
+        }
+
     for attempt in range(max_retries):
         try:
             messages = []
             if system_prompt:
-                role = "developer" if model_name.startswith(("o1", "o3")) else "system"
+                role = "developer" if is_o_series else "system"
                 messages.append({"role": role, "content": system_prompt})
 
             messages.append({"role": "user", "content": content})

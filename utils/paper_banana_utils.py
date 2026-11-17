@@ -653,6 +653,10 @@ def generate_figure_visuals(
     """
     Generates the figure based on the task type.
     """
+    # shortcut: the whole plotting path stays on Gemini, so --use_plotting needs Gemini
+    # credentials even when LLM_PROVIDER=openai. Diagram rendering has no OpenAI equivalent
+    # here, and the critic loop feeds back raw base64 frames the dispatcher does not carry.
+    # Upgrade when the dispatcher grows an image-generation and a base64-image entry point.
     if task_name == "plot":
         prompt_text = f"Use python matplotlib to generate a statistical plot based on the following detailed description: {figure_description}\n Only provide the code without any explanations. Code:"
         contents = [

@@ -45,6 +45,55 @@ Acting like an orchestrated team of specialized agents, it handles outline gener
     SMTP_PASSWORD=your_password
     ```
 
+## Choosing a Model Provider
+
+Every `--*_model_name` argument accepts either a plain model name or an explicit
+`provider:model` form. The supported providers are `openai` and `gemini`.
+
+```bash
+--writer_model_name gemini-3.1-pro-preview                    # Gemini (default)
+--writer_model_name gpt-4o                                    # OpenAI
+--writer_model_name openai:anthropic/claude-sonnet-4.5        # explicit provider
+```
+
+A provider is picked in this order:
+
+1. An explicit `openai:` / `gemini:` prefix on the model name.
+2. The `LLM_PROVIDER` environment variable (`openai` or `gemini`).
+3. A legacy fallback: names containing `gpt`, `o1` or `o3` go to OpenAI, everything else
+   to Gemini. This keeps existing model names working unchanged.
+
+### OpenAI-compatible endpoints (OpenRouter, vLLM, ...)
+
+The `openai` provider is not limited to OpenAI's own models. The client picks up
+`OPENAI_BASE_URL` from the environment, so any OpenAI-compatible endpoint works, and the
+model name is passed through untouched:
+
+```env
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_API_KEY=your_openrouter_api_key
+LLM_PROVIDER=openai
+```
+
+With `LLM_PROVIDER=openai` set, a bare name such as `anthropic/claude-sonnet-4.5` or
+`meta-llama/llama-3.3-70b-instruct:free` is routed to that endpoint. OpenRouter's `:free`
+style suffixes are not mistaken for a provider prefix.
+
+See [Tests](#tests) for how to verify your setup.
+
+### What still requires Gemini
+
+Two parts of the pipeline call Gemini directly regardless of the provider you choose, so
+they need `GEMINI_API_KEY` (or `VERTEX_AI_PROJECT`/`VERTEX_AI_LOCATION`) to be set:
+
+*   **Literature discovery**, which relies on Gemini's Google Search grounding, along with
+    the citation-title parsing helper it feeds.
+*   **Plotting and figure generation** (`--use_plotting`), because diagram rendering and the
+    visual critic loop have no equivalent on the OpenAI side here.
+
+Outline generation, literature synthesis, section writing, content refinement and the
+autoraters all honour the selected provider.
+
 ## Dataset
 
 The dataset used for paper generation is **not included** in this code repository. It will be released separately at a later date.
@@ -73,12 +122,74 @@ python paper_writing_cli.py \
 *   `--latex_template_dir`: (Required) Directory containing the LaTeX template (e.g., `templates/cvpr2025`).
 *   `--output_dir`: Directory to output the generated paper. If not specified, an automatic folder with a timestamp is created.
 *   `--use_plotting`: Enable the plotting agent workflow to generate figures from code (Default: `False`).
-*   `--writer_model_name`: LLM for writer and literature agents.
-*   `--reflection_model_name`: LLM for reflection agents.
+*   `--writer_model_name`: LLM for writer and literature agents. Accepts `provider:model` (see [Choosing a Model Provider](#choosing-a-model-provider)).
+*   `--reflection_model_name`: LLM for reflection agents. Accepts `provider:model`.
 
 ### Interactive Demo
 
 We provide an interactive Streamlit demo for the paper generation pipeline. For instructions on how to run and use it, please refer to the [README.md](frontend/README.md) in the `frontend` directory.
+
+## Tests
+
+There is no test framework to install; both scripts run on plain Python.
+
+```bash
+python tests/test_provider_resolution.py   # offline, no API key, takes a second
+python tests/test_pipeline_providers.py    # live, calls real APIs, a few cents
+```
+
+*   `test_provider_resolution.py` checks the provider routing rules: prefixes, the
+    `LLM_PROVIDER` variable, the legacy fallback, and that OpenRouter `:free` style
+    suffixes are not mistaken for a provider prefix.
+*   `test_pipeline_providers.py` runs the outline agent — the first pipeline step, whose
+    output every later agent consumes — end to end against each provider you have
+    credentials for, then asserts the outline carries the keys the downstream agents
+    read. A provider with no credentials is **skipped**, not failed, so the script is
+    useful whether you run Gemini only, an OpenAI-compatible endpoint only, or both.
+    It exits non-zero if a configured provider fails or if none was exercised.
+
+It defaults to cheap models rather than the pipeline defaults, and both are overridable:
+
+```bash
+TEST_OPENAI_MODEL=openai:anthropic/claude-sonnet-4.5 \
+TEST_GEMINI_MODEL=gemini:gemini-3.6-flash \
+python tests/test_pipeline_providers.py
+```
+
+### Default model names may not be reachable from your account
+
+The `--*_model_name` defaults in `paper_writing_cli.py` (`gemini-3.1-pro-preview`,
+`gemini-3-flash-preview`, `gemini-3-pro-image-preview`) are **not available on every Gemini
+account**. Which models a key can reach varies with the account's tier and age, so the
+defaults are not a safe assumption.
+
+Observed on a **free-tier** Gemini API key (no billing enabled), November 2026:
+
+| Model | Result |
+|---|---|
+| `gemini-3.1-pro-preview` (pipeline default) | `404 NOT_FOUND` — "not found for API version v1, or is not supported for generateContent" |
+| `gemini-3-flash-preview` (hardcoded in literature discovery) | `404 NOT_FOUND` |
+| `gemini-2.5-pro`, `gemini-2.5-flash` | `404 NOT_FOUND` — "no longer available to new users" |
+| `gemini-3.5-flash`, `gemini-3.6-flash` | works |
+| `gemini-3.8-flash` | `503 UNAVAILABLE` — high demand, transient and unrelated to the above |
+
+A paid key is likely to reach more of these, but this has not been confirmed — treat the
+tier as the likely cause, not a verified one, and check your own key rather than assuming.
+
+This bites later than you would expect: the outline step takes whatever `--writer_model_name`
+you pass, so a run can start fine and only fail once it reaches literature discovery, which
+has its model name hardcoded in `methods/agents/literature_review_agent.py`.
+
+To list what your key can actually reach:
+
+```python
+from utils.gemini_utils import get_genai_client
+print([m.name for m in get_genai_client().models.list()])
+```
+
+Then pass one of those explicitly, e.g. `--writer_model_name gemini-3.5-flash`. Routing a
+non-Gemini provider does not avoid this: literature discovery and plotting always call
+Gemini (see [What still requires Gemini](#what-still-requires-gemini)).
 
 ## Project Structure
 
@@ -86,6 +197,7 @@ We provide an interactive Streamlit demo for the paper generation pipeline. For 
 *   `methods/`: Core logic for agents and pipeline execution.
 *   `templates/`: LaTeX templates for target conferences, you can add your own template by creating a new subfolder under this directory.
 *   `utils/`: Utility functions for API calls, PDF handling, etc.
+*   `tests/`: Provider routing and live pipeline checks (see [Tests](#tests)).
 
 ## Citation
 

@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-from typing import Optional, Callable, Dict, Any
+import os
+from typing import Optional, Callable, Dict, Any, Tuple
 
 from google.genai import types
 
@@ -32,22 +32,54 @@ from utils.openai_utils import (
 from utils.pdf_utils import load_paper
 
 
+PROVIDERS = ("openai", "gemini")
+
+
 def identity_parse(response: str):
     return response
 
 
-def get_llm_parser(model_name: str, return_json: bool = True) -> Callable:
+def resolve_model(model_name: str) -> Tuple[str, str]:
+    """Picks the backend for a model, returning (provider, name to send to the API).
+
+    Resolution order:
+      1. An explicit "openai:" or "gemini:" prefix, e.g. "openai:anthropic/claude-sonnet-4.5".
+      2. The LLM_PROVIDER environment variable.
+      3. The legacy gpt/o1/o3 substring heuristic, so existing model names keep working.
+
+    Any OpenAI-compatible endpoint (OpenRouter, vLLM, ...) is reached with the "openai"
+    provider plus OPENAI_BASE_URL; the model name itself is passed through untouched.
+    """
+    prefix, separator, rest = model_name.partition(":")
+    if separator and prefix.lower() in PROVIDERS:
+        return prefix.lower(), rest
+
+    default_provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    if default_provider:
+        if default_provider not in PROVIDERS:
+            raise ValueError(
+                f"LLM_PROVIDER must be one of {PROVIDERS}, got '{default_provider}'."
+            )
+        return default_provider, model_name
+
+    lowered = model_name.lower()
+    if "gpt" in lowered or "o1" in lowered or "o3" in lowered:
+        return "openai", model_name
+    return "gemini", model_name
+
+
+def get_parser_for_provider(provider: str, return_json: bool = True) -> Callable:
     if not return_json:
         return identity_parse
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
+    if provider == "openai":
         return parse_openai_json_results
     else:
         return parse_gemini_json_results
+
+
+def get_llm_parser(model_name: str, return_json: bool = True) -> Callable:
+    return get_parser_for_provider(resolve_model(model_name)[0], return_json)
 
 
 def call_llm_with_text_prompt(
@@ -61,30 +93,24 @@ def call_llm_with_text_prompt(
     """
     Unified function to call either Gemini or OpenAI models based on the model_name.
     """
+    provider, api_model_name = resolve_model(model_name)
     parser = (
         result_parsing_func
         if result_parsing_func is not None
-        else get_llm_parser(model_name, return_json)
+        else get_parser_for_provider(provider, return_json)
     )
 
     if generation_configs is None:
         generation_configs = {}
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
-        system_prompt = None
-        configs_for_openai = dict(generation_configs) if generation_configs else {}
-        if "system_instruction" in configs_for_openai:
-            system_prompt = configs_for_openai.pop("system_instruction")
-        if "temperature" in configs_for_openai:
-            configs_for_openai.pop("temperature")
+    if provider == "openai":
+        # Copy to avoid side-effects on caller's dictionary
+        configs_for_openai = dict(generation_configs)
+        system_prompt = configs_for_openai.pop("system_instruction", None)
 
         response_dict = call_openai_models_with_text_prompt(
             prompt=prompt,
-            model_name=model_name,
+            model_name=api_model_name,
             generation_configs=configs_for_openai,
             result_parsing_func=parser,
             check_parsed_response_not_none=check_parsed_response_not_none,
@@ -94,7 +120,7 @@ def call_llm_with_text_prompt(
     else:
         response_dict = call_gemini_with_text_prompt(
             prompt=prompt,
-            model_name=model_name,
+            model_name=api_model_name,
             generation_configs=generation_configs,
             result_parsing_func=parser,
             check_parsed_response_not_none=check_parsed_response_not_none,
@@ -114,27 +140,20 @@ def call_llm_with_images(
     """
     Unified function to call either Gemini or OpenAI models with images based on the model_name.
     """
+    provider, api_model_name = resolve_model(model_name)
     parser = (
         result_parsing_func
         if result_parsing_func is not None
-        else get_llm_parser(model_name, return_json)
+        else get_parser_for_provider(provider, return_json)
     )
 
     if generation_configs is None:
         generation_configs = {}
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
-        system_prompt = None
+    if provider == "openai":
         # Copy to avoid side-effects on caller's dictionary
-        configs_for_openai = dict(generation_configs) if generation_configs else {}
-        if "system_instruction" in configs_for_openai:
-            system_prompt = configs_for_openai.pop("system_instruction")
-        if "temperature" in configs_for_openai:
-            configs_for_openai.pop("temperature")
+        configs_for_openai = dict(generation_configs)
+        system_prompt = configs_for_openai.pop("system_instruction", None)
 
         content = [{"type": "text", "text": prompt}]
         for image_path in images:
@@ -142,7 +161,7 @@ def call_llm_with_images(
 
         response_dict = call_openai_models_with_content(
             content=content,
-            model_name=model_name,
+            model_name=api_model_name,
             generation_configs=configs_for_openai,
             result_parsing_func=parser,
             check_parsed_response_not_none=check_parsed_response_not_none,
@@ -153,7 +172,7 @@ def call_llm_with_images(
         response_dict = call_gemini_with_images(
             prompt=prompt,
             images=images,
-            model_name=model_name,
+            model_name=api_model_name,
             generation_configs=generation_configs,
             result_parsing_func=parser,
             check_parsed_response_not_none=check_parsed_response_not_none,
@@ -175,25 +194,21 @@ def call_llm_with_pdf(
     Unified function to evaluate a PDF.
     Passes raw PDF bytes to Gemini, and extracted text to OpenAI.
     """
+    provider, api_model_name = resolve_model(model_name)
     parser = (
         result_parsing_func
         if result_parsing_func is not None
-        else get_llm_parser(model_name, return_json)
+        else get_parser_for_provider(provider, return_json)
     )
 
-    if (
-        "gpt" in model_name.lower()
-        or "o1" in model_name.lower()
-        or "o3" in model_name.lower()
-    ):
+    if provider == "openai":
         paper_text = load_paper(pdf_path, min_size=100)
         full_prompt = f"Paper Content:\n{paper_text}\n\nTask:\n{prompt}"
 
-        generation_configs = {}
         response_dict = call_openai_models_with_text_prompt(
             prompt=full_prompt,
-            model_name=model_name,
-            generation_configs=generation_configs,
+            model_name=api_model_name,
+            generation_configs={"temperature": temperature},
             result_parsing_func=parser,
             check_parsed_response_not_none=check_parsed_response_not_none,
             system_prompt=system_instruction,
@@ -214,7 +229,7 @@ def call_llm_with_pdf(
 
         response_dict = call_gemini_with_contents(
             contents=contents,
-            model_name=model_name,
+            model_name=api_model_name,
             generation_configs=generation_configs,
             result_parsing_func=parser,
             check_parsed_response_not_none=check_parsed_response_not_none,
