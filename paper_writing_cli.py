@@ -18,6 +18,13 @@ import os
 import shutil
 from datetime import datetime
 
+# The pipeline reports progress with emoji, which a Windows console (cp1252) cannot
+# encode: printing one raises UnicodeEncodeError before any work is done. Done at
+# import time so it covers every print, including those from the agents below.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def main():
     parser = argparse.ArgumentParser(
