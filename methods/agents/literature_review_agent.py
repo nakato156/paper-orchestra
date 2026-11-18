@@ -119,7 +119,7 @@ class HybridLiteratureAgent:
             f"🚀 Starting Fast Hybrid Literature Agent (Cutoff: {cutoff_date}, Threads: {self.max_workers})..."
         )
 
-        with open(outline_path, "r") as f:
+        with open(outline_path, "r", encoding="utf-8") as f:
             outline = json.load(f)
 
         outline_output_path = f"{self.output_dir}/outline_v1.json"
@@ -778,7 +778,7 @@ class HybridLiteratureAgent:
         loaded = {}
         for name, path in self.context_paths.items():
             if os.path.exists(path):
-                with open(path, "r") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     loaded[name] = f.read()
             else:
                 loaded[name] = ""

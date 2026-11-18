@@ -48,7 +48,9 @@ def load_md_file(md_file_path: str):
         )
         return None
 
-    with open(md_file_path, "r") as f:
+    # Explicit encoding: raw materials routinely carry degree signs, en dashes and
+    # accents, and Python on Windows would otherwise decode them as cp1252 and fail.
+    with open(md_file_path, "r", encoding="utf-8") as f:
         prompt_content = f.read()
 
     return prompt_content
