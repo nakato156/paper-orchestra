@@ -20,12 +20,11 @@ import json
 import matplotlib.pyplot as plt
 import json_repair
 from typing import Dict, Any, List, Tuple
-from google.genai import types
 
-from utils.gemini_utils import (
-    call_gemini_with_text_prompt,
-    call_gemini_with_contents,
-    generate_image_with_gemini,
+from utils.llm_backend_utils import (
+    call_llm_with_images,
+    call_llm_with_text_prompt,
+    generate_image,
 )
 
 cur_dir = os.path.dirname(os.path.realpath(__file__))
@@ -375,11 +374,8 @@ def retrieve_few_shot_examples(
 
     user_prompt += "Now, based on the Target Input and the Candidate Pool, select the Top 10 most relevant examples."
 
-    response_dict = call_gemini_with_contents(
-        contents=[
-            types.Part.from_text(text=system_prompt),
-            types.Part.from_text(text=user_prompt),
-        ],
+    response_dict = call_llm_with_text_prompt(
+        prompt=f"{system_prompt}\n\n{user_prompt}",
         model_name=model_name,
         result_parsing_func=identity_parse,
     )
@@ -432,28 +428,15 @@ def generate_figure_caption(
         "temperature": 0.5,
     }
 
-    if base64_image and len(base64_image) > 100:
-        contents = [
-            types.Part.from_text(text=prompt),
-            types.Part.from_bytes(
-                data=base64.b64decode(base64_image), mime_type="image/jpeg"
-            ),
-        ]
-        response_dict = call_gemini_with_contents(
-            contents=contents,
-            model_name=model_name,
-            result_parsing_func=identity_parse,
-            generation_configs=generation_configs,
-            check_parsed_response_not_none=True,
-        )
-    else:
-        response_dict = call_gemini_with_text_prompt(
-            prompt=prompt,
-            model_name=model_name,
-            result_parsing_func=identity_parse,
-            generation_configs=generation_configs,
-            check_parsed_response_not_none=True,
-        )
+    has_image = bool(base64_image and len(base64_image) > 100)
+    response_dict = call_llm_with_images(
+        prompt=prompt,
+        images_base64=[base64_image] if has_image else None,
+        model_name=model_name,
+        result_parsing_func=identity_parse,
+        generation_configs=generation_configs,
+        check_parsed_response_not_none=True,
+    )
 
     res = response_dict.get("parsed_response", "")
     if res.startswith("Caption:"):
@@ -483,8 +466,12 @@ def predict_figure_content(
         content_label = "Methodology Section"
         visual_intent_label = "Diagram Caption"
 
-    user_prompt = ""
-    contents = [types.Part.from_text(text=system_prompt)]
+    # shortcut: reference images are appended after the text rather than interleaved
+    # with the example each belongs to, because the dispatcher takes a prompt plus a
+    # list of images. Only reachable with the PaperBanana dataset present; upgrade to an
+    # interleaved content entry point if few-shot quality suffers.
+    user_prompt = f"{system_prompt}\n"
+    reference_images = []
 
     for idx, item in enumerate(examples):
         user_prompt += f"Example {idx+1}:\n"
@@ -495,22 +482,13 @@ def predict_figure_content(
 
         user_prompt += f"{content_label}: {item_content}\n"
         user_prompt += f"{visual_intent_label}: {item.get('visual_intent', item.get('caption', ''))}\nReference {task_name.capitalize()}: "
-        contents.append(types.Part.from_text(text=user_prompt))
 
-        # Resolve related image base64
         image_path = os.path.join(
             PB_DIR, f"data/PaperBananaBench/{task_name}", item["path_to_gt_image"]
         )
         if os.path.exists(image_path):
             with open(image_path, "rb") as f:
-                ref_image_base64 = base64.b64encode(f.read()).decode("utf-8")
-                contents.append(
-                    types.Part.from_bytes(
-                        data=base64.b64decode(ref_image_base64), mime_type="image/jpeg"
-                    )
-                )
-
-        user_prompt = ""
+                reference_images.append(base64.b64encode(f.read()).decode("utf-8"))
 
     user_prompt += f"Now, based on the following {content_label.lower()} and {visual_intent_label.lower()}, provide a detailed description for the figure to be generated.\n"
     user_prompt += (
@@ -521,10 +499,9 @@ def predict_figure_content(
         user_prompt += " (do not include figure titles)"
     user_prompt += ":"
 
-    contents.append(types.Part.from_text(text=user_prompt))
-
-    response_dict = call_gemini_with_contents(
-        contents=contents,
+    response_dict = call_llm_with_images(
+        prompt=user_prompt,
+        images_base64=reference_images or None,
         model_name=model_name,
         result_parsing_func=identity_parse,
     )
@@ -562,11 +539,8 @@ def style_figure_content(
     user_prompt += f"{context_labels[0]}: {raw_content}\n"
     user_prompt += f"{context_labels[1]}: {description}\nYour Output:"
 
-    response_dict = call_gemini_with_contents(
-        contents=[
-            types.Part.from_text(text=system_prompt),
-            types.Part.from_text(text=user_prompt),
-        ],
+    response_dict = call_llm_with_text_prompt(
+        prompt=f"{system_prompt}\n\n{user_prompt}",
         model_name=model_name,
         result_parsing_func=identity_parse,
     )
@@ -594,29 +568,16 @@ def critique_and_revise_figure(
         critique_target = "Target Diagram for Critique:"
         context_labels = ["Methodology Section", "Figure Caption"]
 
-    contents = [
-        types.Part.from_text(text=system_prompt),
-        types.Part.from_text(text=critique_target),
-    ]
+    has_image = bool(base64_image and len(base64_image) > 100)
+    prompt = f"{system_prompt}\n{critique_target}"
+    if not has_image:
+        prompt += "\n[SYSTEM NOTICE] The plot image could not be generated based on the current description (likely due to invalid code). Please check the description for errors (e.g., syntax issues, missing data) and provide a revised version."
 
-    if base64_image and len(base64_image) > 100:
-        contents.append(
-            types.Part.from_bytes(
-                data=base64.b64decode(base64_image), mime_type="image/jpeg"
-            )
-        )
-    else:
-        contents.append(
-            types.Part.from_text(
-                text="\n[SYSTEM NOTICE] The plot image could not be generated based on the current description (likely due to invalid code). Please check the description for errors (e.g., syntax issues, missing data) and provide a revised version."
-            )
-        )
+    prompt += f"\nDetailed Description: {figure_desc}\n{context_labels[0]}: {raw_content}\n{context_labels[1]}: {description}\nYour Output:"
 
-    user_prompt = f"\nDetailed Description: {figure_desc}\n{context_labels[0]}: {raw_content}\n{context_labels[1]}: {description}\nYour Output:"
-    contents.append(types.Part.from_text(text=user_prompt))
-
-    response_dict = call_gemini_with_contents(
-        contents=contents,
+    response_dict = call_llm_with_images(
+        prompt=prompt,
+        images_base64=[base64_image] if has_image else None,
         model_name=model_name,
         result_parsing_func=identity_parse,
     )
@@ -653,18 +614,11 @@ def generate_figure_visuals(
     """
     Generates the figure based on the task type.
     """
-    # shortcut: the whole plotting path stays on Gemini, so --use_plotting needs Gemini
-    # credentials even when LLM_PROVIDER=openai. Diagram rendering has no OpenAI equivalent
-    # here, and the critic loop feeds back raw base64 frames the dispatcher does not carry.
-    # Upgrade when the dispatcher grows an image-generation and a base64-image entry point.
     if task_name == "plot":
+        # A plot is matplotlib code, executed locally, so this works on any text model.
         prompt_text = f"Use python matplotlib to generate a statistical plot based on the following detailed description: {figure_description}\n Only provide the code without any explanations. Code:"
-        contents = [
-            types.Part.from_text(text=PLOT_VISUALIZER_AGENT_SYSTEM_PROMPT),
-            types.Part.from_text(text=prompt_text),
-        ]
-        response_dict = call_gemini_with_contents(
-            contents=contents,
+        response_dict = call_llm_with_text_prompt(
+            prompt=f"{PLOT_VISUALIZER_AGENT_SYSTEM_PROMPT}\n\n{prompt_text}",
             model_name=model_name,
             result_parsing_func=identity_parse,
         )
@@ -672,10 +626,11 @@ def generate_figure_visuals(
         base64_img = execute_plot_code_worker(code_text)
         return base64_img
     else:
-        # Prompt for diagram image generation
+        # A diagram has to be generated as an image, which not every provider can do.
+        # generate_image returns None in that case and the caller skips the figure.
         prompt_text = f"Render an image based on the following detailed description: {figure_description}\n Note that do not include figure titles in the image. Diagram: "
 
-        return generate_image_with_gemini(
+        return generate_image(
             model_name=image_model_name,
             prompt=prompt_text,
             aspect_ratio=aspect_ratio,

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import os
 from typing import Optional, Callable, Dict, Any, Tuple
 
@@ -22,11 +23,14 @@ from utils.gemini_utils import (
     parse_gemini_json_results,
     call_gemini_with_contents,
     call_gemini_with_images,
+    generate_image_with_gemini,
 )
 from utils.openai_utils import (
     call_openai_models_with_text_prompt,
     call_openai_models_with_content,
     parse_openai_json_results,
+    generate_image_with_openai,
+    get_openai_image_part_from_base64,
     get_openai_image_part_from_path,
 )
 from utils.pdf_utils import load_paper
@@ -130,15 +134,19 @@ def call_llm_with_text_prompt(
 
 def call_llm_with_images(
     prompt: str,
-    images: list[str],
-    model_name: str,
+    images: Optional[list[str]] = None,
+    model_name: str = None,
     generation_configs: Optional[Dict[str, Any]] = None,
     check_parsed_response_not_none: bool = True,
     return_json: bool = True,
     result_parsing_func: Optional[Callable] = None,
+    images_base64: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     """
     Unified function to call either Gemini or OpenAI models with images based on the model_name.
+
+    Images may be given as file paths, as base64 strings for callers that already hold
+    them in memory, or both.
     """
     provider, api_model_name = resolve_model(model_name)
     parser = (
@@ -156,8 +164,10 @@ def call_llm_with_images(
         system_prompt = configs_for_openai.pop("system_instruction", None)
 
         content = [{"type": "text", "text": prompt}]
-        for image_path in images:
+        for image_path in images or []:
             content.extend(get_openai_image_part_from_path(image_path))
+        for b64_image in images_base64 or []:
+            content.extend(get_openai_image_part_from_base64(b64_image))
 
         response_dict = call_openai_models_with_content(
             content=content,
@@ -176,8 +186,53 @@ def call_llm_with_images(
             generation_configs=generation_configs,
             result_parsing_func=parser,
             check_parsed_response_not_none=check_parsed_response_not_none,
+            images_base64=images_base64,
         )
         return response_dict
+
+
+def generate_image(
+    model_name: str,
+    prompt: str,
+    aspect_ratio: str = "16:9",
+    generation_configs: Optional[Dict[str, Any]] = None,
+    save_path: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Unified image generation. Returns the image as base64, or None when the selected
+    provider could not produce one -- including providers that do not generate images
+    at all, such as a local Ollama or vLLM endpoint. Callers are expected to carry on
+    without the figure rather than treat None as fatal.
+    """
+    provider, api_model_name = resolve_model(model_name)
+    if generation_configs is None:
+        generation_configs = {}
+
+    if provider == "openai":
+        configs = dict(generation_configs)
+        base64_image = generate_image_with_openai(
+            model_name=api_model_name,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            system_instruction=configs.pop("system_instruction", None),
+        )
+        if base64_image and save_path:
+            try:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                with open(save_path, "wb") as fh:
+                    fh.write(base64.b64decode(base64_image))
+                print(f"Image for prompt '{prompt}' saved to {save_path}")
+            except Exception as e:
+                print(f"Warning: Failed to save image to {save_path}: {e}")
+        return base64_image
+
+    return generate_image_with_gemini(
+        model_name=api_model_name,
+        prompt=prompt,
+        aspect_ratio=aspect_ratio,
+        generation_configs=generation_configs,
+        save_path=save_path,
+    )
 
 
 def call_llm_with_pdf(

@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from utils.llm_backend_utils import resolve_model  # noqa: E402
+from utils.llm_backend_utils import generate_image, resolve_model  # noqa: E402
 from utils.openai_utils import is_o_series_model  # noqa: E402
 
 
@@ -71,6 +71,31 @@ try:
     raise AssertionError("expected ValueError for an unknown LLM_PROVIDER")
 except ValueError as error:
     assert "openrouter" in str(error), error
+os.environ.pop("LLM_PROVIDER", None)
+
+# Image generation routes the same way. Checked by which credential it demands, so no
+# network and no key are needed.
+os.environ.pop("LLM_PROVIDER", None)
+for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "VERTEX_AI_PROJECT", "VERTEX_AI_LOCATION"):
+    os.environ[key] = ""
+
+
+def image_backend(model_name, env_provider=None):
+    if env_provider is None:
+        os.environ.pop("LLM_PROVIDER", None)
+    else:
+        os.environ["LLM_PROVIDER"] = env_provider
+    try:
+        generate_image(model_name=model_name, prompt="unused")
+    except ValueError as error:
+        return "openai" if "OPENAI_API_KEY" in str(error) else "gemini"
+    raise AssertionError(f"{model_name}: expected a missing-credential error")
+
+
+assert image_backend("gemini-3-pro-image-preview") == "gemini"
+assert image_backend("openai:google/gemini-3-pro-image") == "openai"
+assert image_backend("gemini:gemini-3-pro-image") == "gemini"
+assert image_backend("gemini-3-pro-image", env_provider="openai") == "openai"
 os.environ.pop("LLM_PROVIDER", None)
 
 # o-series detection drives both the 'developer' role and dropping temperature.

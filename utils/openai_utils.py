@@ -207,10 +207,51 @@ def call_openai_models_with_text_prompt(
     )
 
 
-def get_openai_image_part_from_path(image_path: str):
-    with open(image_path, "rb") as image_file:
-        base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+def generate_image_with_openai(
+    model_name: str,
+    prompt: str,
+    aspect_ratio: str = "16:9",
+    system_instruction: str = None,
+    max_retries: int = 3,
+    base_interval_sec: int = 5,
+) -> str:
+    """Generates an image and returns it as base64, or None if it could not be produced.
 
+    Uses the standard /images/generations endpoint rather than OpenRouter's inline
+    chat-completions variant, so the same code reaches OpenAI and anything else that
+    implements the OpenAI image API. The aspect ratio is asked for in the prompt
+    because that endpoint takes a pixel size, not a ratio, and providers disagree on
+    which sizes they accept.
+    """
+    full_prompt = prompt
+    if system_instruction:
+        full_prompt = f"{system_instruction}\n\n{prompt}"
+    full_prompt = f"{full_prompt}\n\nUse a {aspect_ratio} aspect ratio."
+
+    client = get_openai_client()
+    for attempt in range(max_retries):
+        try:
+            response = client.images.generate(model=model_name, prompt=full_prompt)
+            for item in response.data or []:
+                if getattr(item, "b64_json", None):
+                    return item.b64_json
+            print(f"Warning: {model_name} returned no image data.")
+            return None
+        except Exception as e:
+            print(
+                f"Warning: OpenAI image generation (model={model_name}) failed on "
+                f"attempt {attempt + 1} of {max_retries}. Error: {e}"
+            )
+            if attempt + 1 == max_retries:
+                return None
+            delay = base_interval_sec * (2 ** (attempt - 1)) if attempt > 0 else 0
+            if delay > 0:
+                time.sleep(delay)
+
+    return None
+
+
+def get_openai_image_part_from_base64(base64_image: str):
     image_content = [
         {
             "type": "image_url",
@@ -220,3 +261,10 @@ def get_openai_image_part_from_path(image_path: str):
         }
     ]
     return image_content
+
+
+def get_openai_image_part_from_path(image_path: str):
+    with open(image_path, "rb") as image_file:
+        base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+
+    return get_openai_image_part_from_base64(base64_image)

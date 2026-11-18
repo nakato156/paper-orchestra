@@ -247,22 +247,30 @@ def call_gemini_with_text_prompt(
 
 def call_gemini_with_images(
     prompt: str,
-    images: list[str],
-    model_name: str,
+    images: list[str] = None,
+    model_name: str = None,
     result_parsing_func: callable = parse_gemini_json_results,
     generation_configs: dict = {},
     check_parsed_response_not_none: bool = True,
     max_retries: int = 5,
     base_interval_sec: int = 5,
+    images_base64: list[str] = None,
 ):
     llm_contents = [
         types.Part.from_text(text=prompt),
     ]
-    for image_path in images:
+    for image_path in images or []:
         with open(image_path, "rb") as f:
             img_bytes = f.read()
         llm_contents.append(
             types.Part.from_bytes(data=img_bytes, mime_type="image/png")
+        )
+    # Callers that already hold an image in memory, such as the plotting critic loop.
+    for b64_image in images_base64 or []:
+        llm_contents.append(
+            types.Part.from_bytes(
+                data=base64.b64decode(b64_image), mime_type="image/jpeg"
+            )
         )
 
     response_dict = call_gemini_with_contents(

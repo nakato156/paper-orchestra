@@ -128,11 +128,16 @@ else:
     assert "attention" in known["title"].lower(), known["title"]
     print(f"title search: ok -> {known['title']} ({known.get('year')})")
 
-    # Only meaningful once we know lookups are working: a title that does not exist
-    # must come back as None rather than as some loosely similar paper.
-    nonsense = s2_title_search("Quantum Banana Transformers for Subaquatic Yodelling")
-    assert nonsense is None, f"expected no match, got {nonsense.get('title')}"
-    print("title search rejects a non-existent paper: ok")
+    # A title that does not exist must come back as None rather than as some loosely
+    # similar paper. s2_title_search returns None for "no match" and for "could not
+    # ask", so confirm S2 actually answered this query before reading anything into it.
+    NONSENSE = "Quantum Banana Transformers for Subaquatic Yodelling"
+    if _s2_get({"query": NONSENSE, "limit": 3, "fields": S2_FIELDS}) is None:
+        skip("title search rejection", "S2 did not answer, so None would prove nothing")
+    else:
+        nonsense = s2_title_search(NONSENSE)
+        assert nonsense is None, f"expected no match, got {nonsense.get('title')}"
+        print("title search rejects a non-existent paper: ok")
 
 # --- the throttle keeps requests spaced out ---
 

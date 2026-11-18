@@ -114,6 +114,16 @@ def process_single_figure(
         aspect_ratio=aspect_ratio,
     )
 
+    if task_name == "diagram" and not base64_img:
+        # Not every provider generates images: a local Ollama or vLLM endpoint cannot.
+        # Skip the diagram rather than spend critic rounds revising an image that was
+        # never produced, and let the rest of the figures go through.
+        print(
+            f"[{fig_plan.get('figure_id', 'Unknown')}] SKIPPED: '{image_model_name}' produced no "
+            f"image. Diagrams need an image-generating model; plots are unaffected."
+        )
+        return None
+
     current_description = styled_figure_desc
     current_img = base64_img
 
@@ -239,7 +249,8 @@ class PlottingAgent:
             for future in concurrent.futures.as_completed(futures):
                 try:
                     res = future.result()
-                    results.append(res)
+                    if res:  # None when the figure was skipped
+                        results.append(res)
                 except Exception as e:
                     plan = futures[future]
                     import traceback

@@ -81,15 +81,32 @@ style suffixes are not mistaken for a provider prefix.
 
 See [Tests](#tests) for how to verify your setup.
 
-### What still requires Gemini
+### Figures and plotting
 
-**Plotting and figure generation** (`--use_plotting`) calls Gemini directly whatever
-provider you select, because diagram rendering and the visual critic loop have no
-equivalent on the OpenAI side here. It needs `GEMINI_API_KEY` (or
-`VERTEX_AI_PROJECT`/`VERTEX_AI_LOCATION`).
+`--use_plotting` honours the selected provider too, through the same `provider:model`
+form on its own two arguments:
 
-Everything else — outline, literature review, section writing, content refinement and the
-autoraters — honours the selected provider.
+```bash
+--plotting_model_name openai:google/gemini-3.1-pro-preview \
+--image_model_name openai:google/gemini-3-pro-image-preview
+```
+
+`--plotting_model_name` drives the text and vision steps: picking few-shot examples,
+planning and styling the figure, writing the matplotlib code, critiquing the rendered
+result and writing the caption. `--image_model_name` drives one thing only, rendering a
+diagram as an image, and is the single step that needs a provider capable of generating
+images.
+
+That distinction is what decides whether figures work on a given setup:
+
+*   **Plots** are matplotlib code that runs on your machine, so any text model produces
+    them — including a local Ollama or vLLM.
+*   **Diagrams** must be generated as an image. OpenRouter serves image models, so they
+    work there. A local text-only endpoint cannot, and in that case each diagram is
+    **skipped with a message and the run continues**, producing the plots.
+
+Nothing in the pipeline requires Gemini credentials any more. Point `--image_model_name`
+at `gemini:...` if you would rather render diagrams through Google's own API.
 
 ## Literature Search Backend
 
@@ -194,8 +211,8 @@ Note that routing a Gemini model through OpenRouter does **not** bring back Goog
 Search grounding, which lives in the Google SDK rather than in the model. Discovery
 works because of the `s2` backend, not the model behind it.
 
-`--use_plotting` is the exception: figure generation still calls Gemini directly and
-needs Google credentials.
+`--use_plotting` follows the same form through `--plotting_model_name` and
+`--image_model_name`; see [Figures and plotting](#figures-and-plotting).
 
 ### Key Arguments
 *   `--raw_materials_dir`: (Required) Directory containing the raw materials (e.g., idea and experimental log).
@@ -273,9 +290,9 @@ from utils.gemini_utils import get_genai_client
 print([m.name for m in get_genai_client().models.list()])
 ```
 
-Then pass one of those explicitly, e.g. `--writer_model_name gemini-3.5-flash`. Routing a
-non-Gemini provider does not avoid this: literature discovery and plotting always call
-Gemini (see [What still requires Gemini](#what-still-requires-gemini)).
+Then pass one of those explicitly, e.g. `--writer_model_name gemini-3.5-flash`. Simpler
+still, serve the same Gemini model through OpenRouter — `openai:google/gemini-3.1-pro-preview`
+— and your Google account's model list stops mattering at all.
 
 ## Project Structure
 
