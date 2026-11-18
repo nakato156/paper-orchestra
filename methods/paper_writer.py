@@ -55,6 +55,23 @@ def write_single_paper(
         shutil.copytree(old_figure_dir, new_figure_dir, dirs_exist_ok=True)
     figures_dir = new_figure_dir
 
+    # The plotting pipeline writes this inventory; without it the section writer is told
+    # "No figures provided." and invents filenames, so provided figures end up referenced
+    # by names that do not exist and silently missing from the PDF.
+    figures_info_path = osp.join(figures_dir, "info.json")
+    if osp.isdir(figures_dir) and not osp.exists(figures_info_path):
+        provided = sorted(
+            name
+            for name in os.listdir(figures_dir)
+            if name.lower().endswith((".pdf", ".png", ".jpg", ".jpeg"))
+        )
+        if provided:
+            # No caption key: the writer then sees its own "No caption provided."
+            # default and writes one from the materials, rather than an empty line.
+            with open(figures_info_path, "w", encoding="utf-8") as f:
+                json.dump([{"name": name} for name in provided], f, indent=4)
+            print(f" > Indexed {len(provided)} provided figures in {figures_info_path}")
+
     max_n_tries = 3
     cur_try = 0
     succeed = False
