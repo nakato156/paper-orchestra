@@ -130,6 +130,21 @@ Two knobs for tuning the client, both rarely needed with a key:
 *   `S2_MAX_RETRIES` — attempts per request before giving up, with exponential backoff that
     honours S2's `Retry-After`. Default `5`.
 
+3.  **LaTeX**: content refinement compiles the manuscript and reads the resulting PDF
+    back, so `pdflatex` and `bibtex` must be on your `PATH`. Install TeX Live, or MiKTeX
+    on Windows, and open a new terminal afterwards so the binaries are visible.
+
+    On MiKTeX, also set package installation to automatic:
+
+    ```bash
+    initexmf --set-config-value="[MPM]AutoInstall=1"
+    ```
+
+    It ships set to "ask first", and a prompt no one can answer makes the first compile
+    of a template hang until the pipeline's 30 second limit kills it. Compiling a
+    template by hand once has the same warming effect, but only for that template's
+    packages.
+
 ## Dataset
 
 The dataset used for paper generation is **not included** in this code repository. It will be released separately at a later date.
@@ -152,6 +167,35 @@ python paper_writing_cli.py \
   --output_dir /path_to_your_output_folder/ \
   --use_plotting true
 ```
+
+### Running entirely through OpenRouter
+
+With `OPENAI_BASE_URL` and `OPENAI_API_KEY` pointing at OpenRouter, and
+`SEMANTIC_SCHOLAR_API_KEY` set, no Google credentials are needed:
+
+```bash
+python paper_writing_cli.py \
+  --raw_materials_dir /path_to_your_raw_materials/ \
+  --latex_template_dir templates/cvpr2025 \
+  --output_dir /path_to_your_output_folder/ \
+  --writer_model_name openai:google/gemini-3.1-pro-preview \
+  --reflection_model_name openai:google/gemini-3.1-pro-preview
+```
+
+Pass the model names explicitly: the defaults are Gemini model ids resolved against
+Google's API, which [may not be reachable from your
+account](#default-model-names-may-not-be-reachable-from-your-account). Serving the same
+Gemini model through OpenRouter, as above, sidesteps that entirely. Any other
+OpenRouter model works the same way — `openai:anthropic/claude-sonnet-4.5`,
+`openai:meta-llama/llama-3.3-70b-instruct` — as does a local endpoint, by pointing
+`OPENAI_BASE_URL` at Ollama or vLLM and naming a model it serves.
+
+Note that routing a Gemini model through OpenRouter does **not** bring back Google
+Search grounding, which lives in the Google SDK rather than in the model. Discovery
+works because of the `s2` backend, not the model behind it.
+
+`--use_plotting` is the exception: figure generation still calls Gemini directly and
+needs Google credentials.
 
 ### Key Arguments
 *   `--raw_materials_dir`: (Required) Directory containing the raw materials (e.g., idea and experimental log).

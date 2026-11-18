@@ -490,7 +490,7 @@ INSTRUCTION:
                 print(" >> No critical formatting issues found. Breaking loop.")
                 break
 
-            print(" >> [VLM] Found formatting issues. Calling Gemini to fix...")
+            print(" >> [VLM] Found formatting issues. Calling the model to fix...")
 
             prompt = f"""You are a LaTeX formatting expert. Your task is to fix the formatting issues identified in the feedback below.
 You must STRICTLY follow the provided formatting guidelines.
